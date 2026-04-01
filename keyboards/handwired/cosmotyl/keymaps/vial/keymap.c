@@ -67,6 +67,18 @@ void keyboard_post_init_user(void) {
     set_auto_mouse_enable(true);
 }
 
+bool combo_should_trigger(uint16_t combo_index, combo_t *combo, uint16_t keycode, keyrecord_t *record) {
+    return !layer_state_is(2);
+}
+
+bool process_record_user(uint16_t keycode, keyrecord_t *record) {
+    // Disable tap dance on gaming layer — send tap keycode immediately
+    if (layer_state_is(2) && keycode >= QK_TAP_DANCE && keycode <= QK_TAP_DANCE_MAX) {
+        return false;
+    }
+    return true;
+}
+
 report_mouse_t pointing_device_task_user(report_mouse_t report) {
     static int16_t acc_x = 0;
     static int16_t acc_y = 0;
@@ -557,7 +569,7 @@ bool oled_task_kb(void) {
         const char *ltag;
         switch (layer) {
             case 1:  ltag = "Nav"; break;
-            case 2:  ltag = "Sym"; break;
+            case 2:  ltag = "Gam"; break;
             case 3:  ltag = "Fn "; break;
             case 4:  ltag = "Mse"; break;
             default: ltag = "   "; break;
