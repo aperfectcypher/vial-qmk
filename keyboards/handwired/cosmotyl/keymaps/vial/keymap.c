@@ -67,18 +67,6 @@ void keyboard_post_init_user(void) {
     set_auto_mouse_enable(true);
 }
 
-bool combo_should_trigger(uint16_t combo_index, combo_t *combo, uint16_t keycode, keyrecord_t *record) {
-    return !layer_state_is(2);
-}
-
-bool process_record_user(uint16_t keycode, keyrecord_t *record) {
-    // Disable tap dance on gaming layer — send tap keycode immediately
-    if (layer_state_is(2) && keycode >= QK_TAP_DANCE && keycode <= QK_TAP_DANCE_MAX) {
-        return false;
-    }
-    return true;
-}
-
 report_mouse_t pointing_device_task_user(report_mouse_t report) {
     static int16_t acc_x = 0;
     static int16_t acc_y = 0;
@@ -89,6 +77,22 @@ report_mouse_t pointing_device_task_user(report_mouse_t report) {
     acc_x %= 6;
     acc_y %= 6;
     return report;
+}
+
+bool combo_should_trigger(uint16_t combo_index, combo_t *combo, uint16_t keycode, keyrecord_t *record) {
+    return !layer_state_is(2);
+}
+
+static bool game_keypress_flag = false;
+
+bool process_record_user(uint16_t keycode, keyrecord_t *record) {
+    if (layer_state_is(2) && keycode >= QK_TAP_DANCE && keycode <= QK_TAP_DANCE_MAX) {
+        return false;
+    }
+    if (layer_state_is(2) && record->event.pressed) {
+        game_keypress_flag = true;
+    }
+    return true;
 }
 
 #ifdef OLED_ENABLE
@@ -492,6 +496,74 @@ static void gol_draw(void) {
             }
 }
 
+// --- Gaming mode display (combo counter + particle burst) ---
+#define GP_MAX 32
+
+static struct { int16_t x, y; int8_t dx, dy; uint8_t life; } gp[GP_MAX];
+static uint16_t game_combo = 0;
+static uint32_t game_last_press = 0;
+
+static void gp_spawn(uint8_t count) {
+    for (uint8_t c = 0; c < count; c++) {
+        for (uint8_t i = 0; i < GP_MAX; i++) {
+            if (gp[i].life == 0) {
+                gp[i].x = 64; gp[i].y = 44;
+                gp[i].dx = (int8_t)(xorshift16() % 9) - 4;
+                gp[i].dy = (int8_t)(xorshift16() % 7) - 3;
+                if (!gp[i].dx && !gp[i].dy) gp[i].dx = 1;
+                gp[i].life = 8 + (xorshift16() % 10);
+                break;
+            }
+        }
+    }
+}
+
+static void gaming_draw(void) {
+    // Process keypress events
+    if (game_keypress_flag) {
+        game_keypress_flag = false;
+        game_combo++;
+        if (game_combo > 999) game_combo = 999;
+        game_last_press = timer_read32();
+        // More particles at higher combos
+        uint8_t burst = (game_combo > 50) ? 8 : (game_combo > 20) ? 6 : 4;
+        gp_spawn(burst);
+    }
+    if (timer_elapsed32(game_last_press) > 2000) game_combo = 0;
+
+    oled_clear();
+
+    // Header: combo count left, "Gam" right
+    char buf[8];
+    buf[0] = 'x';
+    uint16_t c = game_combo;
+    buf[1] = (c >= 100) ? '0' + c / 100 : ' ';
+    buf[2] = (c >= 10)  ? '0' + (c / 10) % 10 : ' ';
+    buf[3] = '0' + c % 10;
+    buf[4] = '\0';
+    oled_write_2x(buf, 0, 10);
+    oled_write_2x("Gam", 92, 10);
+
+    // Update and draw particles
+    for (uint8_t i = 0; i < GP_MAX; i++) {
+        if (gp[i].life == 0) continue;
+        gp[i].x += gp[i].dx;
+        gp[i].y += gp[i].dy;
+        gp[i].life--;
+        if (gp[i].x >= 0 && gp[i].x < 128 && gp[i].y >= 26 && gp[i].y < 64) {
+            oled_write_pixel(gp[i].x, gp[i].y, true);
+            // Bigger particles at high combo
+            if (game_combo > 30 && gp[i].x + 1 < 128)
+                oled_write_pixel(gp[i].x + 1, gp[i].y, true);
+        }
+    }
+
+    // Horizontal streak bar at y=63 based on combo
+    uint8_t bar_w = (game_combo > 100) ? 128 : game_combo * 128 / 100;
+    for (uint8_t x = 0; x < bar_w; x++)
+        oled_write_pixel(x, 63, true);
+}
+
 // --- Screensaver dispatch ---
 #define SS_ROTATE_MS 60000  // switch screensaver every 60s
 
@@ -549,39 +621,41 @@ bool oled_task_kb(void) {
         if (ss_active) { ss_active = false; oled_clear(); }
         oled_on();
 
-        // Sample WPM into ring buffer
-        if (timer_elapsed32(wpm_timer) > WPM_SAMPLE_MS) {
-            wpm_timer = timer_read32();
-            uint8_t wpm = get_current_wpm();
-            if (wpm > WPM_MAX) wpm = WPM_MAX;
-            wpm_history[wpm_idx] = wpm;
-            wpm_idx = (wpm_idx + 1) % GRAPH_WIDTH;
-        }
+        if (layer_state_is(2)) {
+            // Gaming mode: combo counter + particle burst
+            gaming_draw();
+        } else {
+            // Normal mode: WPM graph
+            if (timer_elapsed32(wpm_timer) > WPM_SAMPLE_MS) {
+                wpm_timer = timer_read32();
+                uint8_t wpm = get_current_wpm();
+                if (wpm > WPM_MAX) wpm = WPM_MAX;
+                wpm_history[wpm_idx] = wpm;
+                wpm_idx = (wpm_idx + 1) % GRAPH_WIDTH;
+            }
 
-        // 2x header at y=10 (first visible row)
-        char buf[12];
-        const char *wpm_str = get_u8_str(get_current_wpm(), ' ');
-        buf[0] = 'W'; buf[1] = 'P'; buf[2] = 'M'; buf[3] = ':';
-        buf[4] = wpm_str[0]; buf[5] = wpm_str[1]; buf[6] = wpm_str[2]; buf[7] = '\0';
-        oled_write_2x(buf, 0, 10);
+            char buf[12];
+            const char *wpm_str = get_u8_str(get_current_wpm(), ' ');
+            buf[0] = 'W'; buf[1] = 'P'; buf[2] = 'M'; buf[3] = ':';
+            buf[4] = wpm_str[0]; buf[5] = wpm_str[1]; buf[6] = wpm_str[2]; buf[7] = '\0';
+            oled_write_2x(buf, 0, 10);
 
-        uint8_t layer = get_highest_layer(layer_state | default_layer_state);
-        const char *ltag;
-        switch (layer) {
-            case 1:  ltag = "Nav"; break;
-            case 2:  ltag = "Gam"; break;
-            case 3:  ltag = "Fn "; break;
-            case 4:  ltag = "Mse"; break;
-            default: ltag = "   "; break;
-        }
-        oled_write_2x(ltag, 92, 10);
+            uint8_t layer = get_highest_layer(layer_state | default_layer_state);
+            const char *ltag;
+            switch (layer) {
+                case 1:  ltag = "Nav"; break;
+                case 3:  ltag = "Fn "; break;
+                case 4:  ltag = "Mse"; break;
+                default: ltag = "   "; break;
+            }
+            oled_write_2x(ltag, 92, 10);
 
-        // WPM graph
-        for (uint8_t x = 0; x < GRAPH_WIDTH; x++) {
-            uint8_t hi = (wpm_idx + x) % GRAPH_WIDTH;
-            uint8_t bar_h = (uint16_t)wpm_history[hi] * GRAPH_HEIGHT / WPM_MAX;
-            for (uint8_t y = 0; y < GRAPH_HEIGHT; y++)
-                oled_write_pixel(x, 63 - y, y < bar_h);
+            for (uint8_t x = 0; x < GRAPH_WIDTH; x++) {
+                uint8_t hi = (wpm_idx + x) % GRAPH_WIDTH;
+                uint8_t bar_h = (uint16_t)wpm_history[hi] * GRAPH_HEIGHT / WPM_MAX;
+                for (uint8_t y = 0; y < GRAPH_HEIGHT; y++)
+                    oled_write_pixel(x, 63 - y, y < bar_h);
+            }
         }
     } else {
         oled_set_cursor(0, 2);
